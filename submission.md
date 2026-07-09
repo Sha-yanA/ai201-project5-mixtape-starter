@@ -91,3 +91,15 @@ I tried it three ways: hitting `GET /songs/search?q=Anthem` on the live app, cal
 I dug a bit further and confirmed this isn't specific to this codebase's setup: I reproduced the same join in a minimal, standalone SQLAlchemy script with no Flask involved, and it also returned one row, even though the raw SQL underneath genuinely returns three. The installed SQLAlchemy version (2.0.51) deduplicates full-entity `Query.all()` results by primary key, even when a join fans out the underlying row count. So the missing `.distinct()` is still a latent issue in the code (it would bite you if you ever selected extra columns from the join, or dropped down to raw SQL), but it doesn't actually produce duplicate results in this app as it's set up right now.
 
 Since I couldn't reproduce the reported behavior after a genuine attempt, and confirmed the seed data was correct, I swapped in Issue #2 in its place per the milestone's guidance.
+
+## Milestone 3: Root Cause Analysis and Fixes
+
+### Issue #1: My listening streak keeps resetting
+
+**How I reproduced it:** covered in Milestone 2 above. Called `update_listening_streak()` directly with a Saturday listen followed by a Sunday listen, one calendar day apart. The streak should go up by 1 but stayed flat instead.
+
+**How I found the root cause:** the docstring for `update_listening_streak()` lays out the rule plainly: same day means no change, one day apart means increment, more than one day means reset. There's no mention of any day-of-week exception. Reading the actual `if/elif/else` block against that docstring, the `elif` branch had an extra condition tacked on, `and today.weekday() != 6`, that isn't described anywhere in the rules above it. That's the kind of mismatch between stated intent and code that's worth chasing: the increment branch should only ever check `days_since_last == 1`.
+
+**The root cause:** in `services/streak_service.py`, the increment condition reads `elif days_since_last == 1 and today.weekday() != 6:`. Python's `datetime.weekday()` returns `6` for Sunday. So on any Sunday, even if the user listened on both Saturday and Sunday (a genuine consecutive day), that `and` clause evaluates to false, the `elif` is skipped, and execution falls through to the `else` branch, which resets the streak to 1 instead of incrementing it.
+
+**My fix and side-effect check:** removed the `and today.weekday() != 6` clause, so the branch now reads `elif days_since_last == 1:`. This is a one-line change scoped only to the increment condition, it doesn't touch the same-day no-op branch or the reset branch. I reran the full test suite (`pytest tests/`): `test_streaks.py` went from 4 passed / 1 failed to 5 passed / 0 failed, and the two unrelated, pre-existing failures in `test_playlists.py` (Issue #5, not part of this fix) are untouched, confirming this change didn't affect anything outside the streak logic. I also reran the original Saturday-to-Sunday reproduction script and confirmed the streak now goes from 1 to 2 instead of resetting to 1.
