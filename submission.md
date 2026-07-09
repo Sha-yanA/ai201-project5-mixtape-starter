@@ -1,5 +1,23 @@
 # Mixtape Submission
 
+## AI Usage
+
+I used Claude Code (an AI coding assistant) throughout this project, mostly for reading and navigating the codebase rather than for generating fixes outright. A rough breakdown of how it was used:
+
+**Codebase orientation (Milestone 1):** I had it read each file in `services/` and summarize what each function was responsible for, then trace the two parallel call chains for rating a song versus adding a song to a playlist, side by side, so I could compare them. That comparison is what surfaced the pattern behind Issue #4 before I'd even picked which bugs to fix: one flow calls `create_notification()`, the other doesn't.
+
+**Reproducing bugs (Milestone 2):** for the two bugs where the reported behavior depends on wall-clock time (a specific weekday for the streak bug, a specific hour-of-day boundary for the feed bug), I couldn't just hit the running app since the real date and time didn't match the conditions in the bug reports. The assistant helped me write small isolated scripts, calling `update_listening_streak()` directly with crafted dates, and mocking `datetime.now()` for the feed function, so I could trigger the exact reported conditions without waiting for a real Sunday or staying up until 11pm.
+
+**Root cause tracing (Milestone 3):** for each bug, I had it walk through the function's docstring against its actual code line by line, since in all three cases the mismatch was between what the docstring said the function should do and what a specific line actually did (an extra weekday check, a duration-based cutoff instead of a calendar-day one, a missing notification call). Comparing stated intent to implementation was more useful here than just asking "what's wrong with this code," since the code isn't obviously broken on its own, it only breaks a specific written contract.
+
+**Where I had to verify or correct it:** the clearest example of not trusting AI output blindly happened on Issue #3 (duplicate search results). Reading the code alone, the missing `.distinct()` on an outer join looked like an obvious, well-understood bug, and it would have been easy to write a fix and move on. But when I actually ran it (hitting the live endpoint, calling the function directly, running the existing test), it didn't reproduce. I dug further with a minimal standalone SQLAlchemy script to confirm this wasn't specific to this app's setup, and found that this version of SQLAlchemy deduplicates full-entity query results by primary key even when a join fans out the row count underneath, so the "obvious" bug doesn't actually manifest as written. That only came out because I insisted on reproducing it before fixing it rather than trusting that the code looked wrong; I swapped in Issue #2 instead once I'd confirmed that.
+
+**Cleaning up commit messages (Milestone 4):** when I ran `git log --oneline` on `bugfix/mixtape` for the final review, my three fix commits were separate (one per bug, nothing bundled), but they weren't in the conventional `fix: ...` format the project asks for, they were things like "Fixes for Issue #4. RCA draafted in the submission document." The branch was already pushed to origin, so rewording them meant rewriting history I'd already shared, not something to do casually.
+
+The assistant walked me through this carefully instead of just running a rebase: it first made a backup branch (`backup-bugfix-mixtape`) pointing at the old commits, in case anything went wrong. Then, instead of an interactive rebase, it rebuilt the branch from scratch on a temporary branch: starting from the commit right before my first fix, it cherry-picked each of the three original fix commits one at a time and immediately re-committed each with a proper `fix:` message, in the same order. After all three were reapplied, it ran `git diff` between the old branch and the new one to confirm the final file contents were byte-for-byte identical, only the commit messages had changed, no code was silently altered in the process. Once that was confirmed, it moved the `bugfix/mixtape` branch pointer to the reworded history.
+
+It did not push the rewritten history on its own. Since `bugfix/mixtape` already existed on origin, force-pushing overwrites shared remote history, and that's a decision I needed to make and run myself: `git push --force-with-lease origin bugfix/mixtape`. All fix decisions, root cause conclusions, and verification steps above were things I reviewed and confirmed myself before writing them up here.
+
 ## Milestone 1: Codebase Map
 
 ### Main files and their roles
