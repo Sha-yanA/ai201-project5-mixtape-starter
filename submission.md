@@ -59,3 +59,35 @@ Contrast with the parallel flow for adding a song to a playlist:
 ### AI-assisted orientation
 
 Used Claude Code to read each service file, summarize its responsibility, and trace the rate-to-notification and add-to-playlist-to-notification call chains side by side to compare the two patterns. This orientation pass was used only to build a mental model of the codebase structure and data flow. No bug fixes were made or attempted during this milestone.
+
+## Milestone 2: Reproducing the Bugs
+
+I picked three bugs to fix: #1 (streak), #2 (listening now), and #4 (rating notification). I originally planned to fix #3 (duplicate search results) instead of #2, but I couldn't actually reproduce it, more on that below, so I swapped it out.
+
+### Issue #1: streak resets on Sunday
+
+**How I reproduced it:** today's real date isn't a Sunday, so I couldn't trigger this through the live app clock. Instead I called `update_listening_streak()` directly with two crafted, consecutive dates: a Saturday evening listen, then a Sunday morning listen for the same user. Both listens are one calendar day apart, so the streak should have gone from 1 to 2. Instead it stayed at 1 after the Sunday listen.
+
+This lines up with the code in `streak_service.py`: the increment branch only fires when `days_since_last == 1 and today.weekday() != 6`. On a Sunday, `today.weekday()` is `6`, so that condition is false even though the user listened on consecutive days, and the streak falls through to the reset branch instead.
+
+### Issue #2: "Friends Listening Now" shows stale entries
+
+**How I reproduced it:** I wanted to reproduce the exact scenario from the report (a friend listens late at night, and is still shown as "listening now" the next morning) without waiting for real time to pass. I set up a friend who listened at 11pm on a given day, then mocked the clock to check the feed at 9am the next day, only 10 hours later but a different calendar day. The friend still showed up in the "listening now" results.
+
+The root cause is in `feed_service.py`: `get_friends_listening_now()` filters listening events using a rolling 24-hour window (`RECENT_THRESHOLD`), not "did this happen today" by calendar date. Anything within the last 24 hours counts as recent, so a late-night listen keeps showing up well into the next morning until the rolling window finally passes it.
+
+### Issue #4: rating a song doesn't notify the sharer
+
+**How I reproduced it:** this one didn't need any mocking, it reproduces directly through the running app. I had one user (simone) rate a song shared by another user (darius) via `POST /songs/<song_id>/rate`. The rating saved correctly (score 5, returned with a 201). I then checked darius's notifications with `GET /users/<darius_id>/notifications` and got back an empty list.
+
+Looking at `notification_service.py`, `add_to_playlist()` calls `create_notification()` after adding a song to a playlist, but `rate_song()` never does. It only writes the `Rating` row and returns. There's no missing condition or typo, the call to `create_notification()` for ratings simply doesn't exist yet.
+
+### A bug that didn't reproduce: Issue #3 (duplicate search results)
+
+Before settling on #2, I tried to reproduce Issue #3 first, since the code in `search_service.py` looked like an obvious candidate: `search_songs()` does an `outerjoin` against `song_tags` without a `.distinct()`, and the seed data has a song ("Crown Heights Anthem") with three tags, exactly the setup the bug report describes.
+
+I tried it three ways: hitting `GET /songs/search?q=Anthem` on the live app, calling `search_songs()` directly in a script, and running the existing test `test_search_no_duplicates_multi_tag_song`. All three returned the song exactly once. No duplicates.
+
+I dug a bit further and confirmed this isn't specific to this codebase's setup: I reproduced the same join in a minimal, standalone SQLAlchemy script with no Flask involved, and it also returned one row, even though the raw SQL underneath genuinely returns three. The installed SQLAlchemy version (2.0.51) deduplicates full-entity `Query.all()` results by primary key, even when a join fans out the underlying row count. So the missing `.distinct()` is still a latent issue in the code (it would bite you if you ever selected extra columns from the join, or dropped down to raw SQL), but it doesn't actually produce duplicate results in this app as it's set up right now.
+
+Since I couldn't reproduce the reported behavior after a genuine attempt, and confirmed the seed data was correct, I swapped in Issue #2 in its place per the milestone's guidance.
